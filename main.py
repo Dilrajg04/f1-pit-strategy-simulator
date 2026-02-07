@@ -2,18 +2,16 @@
 F1 Pit Stop Strategy Simulator (MVP)
 
 What this script does:
-1) Loads real F1 lap data (FastF1)
-2) Cleans laps to remove pit laps and extreme outliers
-3) Builds stint-relative lap index (stint_lap = tire age)
-4) Fits tire degradation per stint (slope of lap_time vs stint_lap)
-5) Aggregates compound-level parameters (median slope + intercept)
-6) Runs a counterfactual 1-stop strategy simulation to find optimal pit lap
-7) Plots pit lap vs simulated total race time and saves a PNG
+1) Loads real Formula 1 race lap data using FastF1
+2) Cleans the data by removing pit laps and unusual outliers
+3) Tracks tire age within each stint
+4) Estimates how lap times slow down as tires wear
+5) Builds compound-level pace and degradation estimates
+6) Simulates different pit stop timings to find the fastest strategy
+7) Plots total race time vs pit lap and saves the result as an image
 
 Notes / assumptions (important for readers):
-- This is a simplified model: no traffic, no safety cars, no variable pit loss
-- "Counterfactual" means we simulate lap times from the fitted model rather than
-  using actual lap times after changing the pit lap.
+- This is a simplified model and does not include:  traffic, safety cars, variable pit loss
 """
 
 import fastf1 as ff1
@@ -23,11 +21,7 @@ import matplotlib.pyplot as plt
 
 
 def load_race(year: int, gp_name: str):
-    """
-    Create a FastF1 session and load race data.
-
-    FastF1 uses a cache directory to avoid redownloading data every run.
-    """
+    # Load and cache a Formula 1 race session so lap data can be accessed locally.
     ff1.Cache.enable_cache("cache")
     session = ff1.get_session(year, gp_name, "R")  # "R" = Race session
     session.load()
@@ -35,17 +29,7 @@ def load_race(year: int, gp_name: str):
 
 
 def clean_laps(laps: pd.DataFrame) -> pd.DataFrame:
-    """
-    Clean raw lap data for modeling.
 
-    Steps:
-    - Drop laps without LapTime
-    - Remove in/out pit laps (unrepresentative pace)
-    - Convert LapTime to seconds
-    - Remove extreme outliers per driver (5th to 95th percentile)
-
-    Returns a smaller dataframe with only columns we need for modeling.
-    """
     df = laps.copy()
 
     # Keep only laps with a recorded lap time
@@ -84,23 +68,16 @@ def add_stint_lap_index(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def fit_degradation_per_stint(df: pd.DataFrame, driver: str, min_stint_laps: int = 8):
-    """
-    Fit degradation (seconds lost per lap) within each stint for a given driver.
+    # Estimate tire degradation per stint for a given driver.
 
-    For each (Stint, Compound), fit a line:
-        lap_time_s = intercept + slope * stint_lap
-
-    Then return:
-    - median slope across stints (robust single degradation estimate)
-    - a dataframe of all stint-level slopes and intercepts
-    """
     d = df[df["Driver"] == driver].copy()
 
-    # Drop the first lap of each stint (often a bit noisy even after cleaning)
+    # Drop first stint lap since it is often noisy.
     d = d[d["stint_lap"] >= 2]
 
     stint_slopes = []
 
+    # Loop through each stint and compound.
     for (stint, compound), g in d.groupby(["Stint", "Compound"]):
         if len(g) < min_stint_laps:
             continue
@@ -108,7 +85,7 @@ def fit_degradation_per_stint(df: pd.DataFrame, driver: str, min_stint_laps: int
         x = g["stint_lap"].values
         y = g["lap_time_s"].values
 
-        # Fit y = m*x + b for this stint
+        # Fit lap time vs tire age.
         m, b = np.polyfit(x, y, 1)
 
         stint_slopes.append(
@@ -141,16 +118,7 @@ def fit_degradation_per_stint(df: pd.DataFrame, driver: str, min_stint_laps: int
 
 
 def get_compound_params(slopes_df: pd.DataFrame):
-    """
-    Aggregate stint-level fits into compound-level parameters.
-
-    For each Compound:
-    - deg_rate = median slope across stints on that compound
-    - base_pace = median intercept across stints on that compound
-      (interpretable as "fresh-ish tire pace" under this linear model)
-
-    Returns: dict[compound] -> {deg_rate, base_pace, n_stints}
-    """
+    # Compute compound-level degradation and base pace from stint fits.
     params = {}
     for compound, g in slopes_df.groupby("Compound"):
         params[compound] = {
@@ -168,25 +136,17 @@ def simulate_counterfactual_one_stop(
     compound_params: dict,
     pit_loss: float = 22.0,
 ):
-    """
-    Counterfactual one-stop simulation.
-
-    For each possible pit lap L:
-    - simulate laps 1..L on pre_compound using (base_pace + deg_rate * stint_lap)
-    - add pit_loss
-    - simulate laps L+1..end on post_compound using its params
-    - compute total simulated race time
-
-    Returns a dataframe with (pit_lap, total_time).
-    """
+    # Simulate total race time for different pit laps using two compounds.
     total_laps = int(driver_laps["LapNumber"].max())
 
     if pre_compound not in compound_params or post_compound not in compound_params:
         raise ValueError(f"Missing compound params. Have: {list(compound_params.keys())}")
 
+    # Parameters for stint before pit
     pre_base = compound_params[pre_compound]["base_pace"]
     pre_deg = compound_params[pre_compound]["deg_rate"]
 
+    # Parameters for stint after pit
     post_base = compound_params[post_compound]["base_pace"]
     post_deg = compound_params[post_compound]["deg_rate"]
 
@@ -229,7 +189,7 @@ def main():
     # ------------------------------
     year = 2024
     gp_name = "Bahrain"
-    driver_code = "LEC"  # e.g., "VER", "LEC", "NOR"
+    driver_code = "HAM"  # e.g., "VER", "LEC", "NOR"
 
     print(f"\nRunning strategy for {driver_code} at {gp_name} {year}")
 
@@ -267,7 +227,7 @@ def main():
 
     # 6) Run main counterfactual sim (choose a starting and target compound)
     # For Bahrain 2024, many drivers started SOFT then went HARD in the race.
-    # If your driver didn't use SOFT in the cleaned data, you'll need to pick a compound that exists in params.
+
     pre_compound = "SOFT"
     post_compound = "HARD"
 
